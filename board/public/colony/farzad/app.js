@@ -25,20 +25,32 @@
     return e;
   }
 
-  async function api(method, path, body) {
-    const init = { method, headers: {} };
-    if (body !== undefined) {
-      init.headers['content-type'] = 'application/json';
-      init.body = JSON.stringify(body);
-    }
-    const r = await fetch(API + path, init);
+  async function getState() {
+    const r = await fetch(`${API}/state`);
     const text = await r.text();
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch (_) { json = null; }
-    return { status: r.status, ok: r.ok, json, text };
+    return { status: r.status, ok: r.ok, json };
   }
 
   function fmtMs(v) { return v == null ? '-' : `${v} ms`; }
+  function fmtAge(ms) { return ms == null ? '-' : `${(ms / 1000).toFixed(1)} s`; }
+  const obj = (v) => (v && typeof v === 'object' ? v : {});
+
+  // Failure codes as red chips, highest count first.
+  function failureChips(failures) {
+    const entries = Object.entries(obj(failures)).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+    if (!entries.length) return [el('span', { cls: 'hint', text: 'none' })];
+    return entries.map(([k, v]) => el('span', { cls: 'chip', text: `${k} ${v}` }));
+  }
+
+  function miniTable(head, rows) {
+    const t = el('table', { cls: 'mini' }, el('thead', null, el('tr', null, ...head.map((h) => el('th', { text: h })))));
+    const tb = el('tbody');
+    for (const r of rows) tb.append(el('tr', null, ...r.map((c) => (c instanceof Node ? el('td', null, c) : el('td', { text: c == null ? '-' : c })))));
+    t.append(tb);
+    return t;
+  }
 
   function ageText(ts) {
     if (ts == null) return 'never';
@@ -63,6 +75,31 @@
       item('detect gateway', fmtMs(gw.detectMs), null, `latest; average ${fmtMs(gw.detectMsAvg)}`),
       item('nodes', String((s.nodes || []).length))
     );
+  }
+
+  // ---- cluster internals (summary) ----
+  function renderInternals(s) {
+    const box = $('internals');
+    const sum = s.summary;
+    if (!sum || typeof sum !== 'object') {
+      box.replaceChildren(el('span', { cls: 'hint', text: 'this backend does not report internals yet' }));
+      return;
+    }
+    const item = (label, ...value) => el('span', null, `${label} `, ...value);
+    const byState = obj(sum.linksByState);
+    const states = STATES.filter((st) => byState[st]).concat(Object.keys(byState).filter((st) => !STATES.includes(st)));
+    const links = states.length
+      ? states.map((st) => el('span', { title: st }, el('span', { cls: `sw s-${STATES.includes(st) ? st : 'unknown'}` }), el('b', { text: byState[st] }), ' '))
+      : [el('span', { cls: 'hint', text: 'none' })];
+    const cs = obj(sum.clockSync);
+    box.replaceChildren(
+      item('links', ...links),
+      item('clock sync', el('b', { text: `${cs.in ?? 0} in / ${cs.out ?? 0} out` }), `, max |offset| ${fmtMs(sum.maxAbsOffsetMs)}`),
+      item('messaging disabled', el('b', { text: sum.messagingDisabled ?? '-', cls: sum.messagingDisabled ? 'warn' : null })),
+      item('inflight', el('b', { text: sum.inflight ?? '-' })),
+      item('pending', el('b', { text: sum.pending ?? '-', title: 'requests sent, awaiting response' })),
+      item('queued', el('b', { text: sum.queued ?? '-', title: 'sends waiting for messaging to open' })),
+      item('failures', ...failureChips(sum.failures)));
   }
 
   // ---- link matrix ----
@@ -144,15 +181,45 @@
     }
     $('nodeTitle').textContent = `${n.nodeId}${n.external ? ' (external)' : ''}`;
     const statusCls = n.status === 'up' ? 'ok' : n.status === 'down' ? 'bad' : 'warn';
-    const pct = Math.min(100, Math.round(((n.inflight || 0) / INFLIGHT_LIMIT) * 100));
+    const limit = (n.limits && n.limits.inflight) || INFLIGHT_LIMIT;
+    const pct = Math.min(100, Math.round(((n.inflight || 0) / limit) * 100));
     const bar = el('span', { cls: `bar${pct >= 80 ? ' hot' : ''}` }, el('i'));
     bar.firstChild.style.width = `${pct}%`;
     const ch = n.chaos || {};
     const kv = el('dl', { cls: 'kv' },
       el('dt', { text: 'status' }), el('dd', { text: n.status, cls: statusCls }),
       el('dt', { text: 'messaging' }), el('dd', { text: n.messaging, cls: n.messaging === 'enabled' ? 'ok' : 'warn' }),
-      el('dt', { text: 'inflight' }), el('dd', null, bar, `${n.inflight ?? 0} / ${INFLIGHT_LIMIT}`),
+      el('dt', { text: 'inflight' }), el('dd', null, bar, `${n.inflight ?? 0} / ${limit}`),
       el('dt', { text: 'chaos' }), el('dd', { text: `delay ${ch.delayMs ?? 0} ms, drop ${ch.dropPercent ?? 0}%, skew ${ch.skewMs ?? 0} ms` }));
+    if (n.queued != null) kv.append(el('dt', { text: 'queued' }), el('dd', { text: n.queued, title: 'sends waiting for messaging to open' }));
+    if (n.pending != null) kv.append(el('dt', { text: 'pending' }), el('dd', { text: n.pending, title: 'requests sent, awaiting response' }));
+    if (n.dedup) kv.append(el('dt', { text: 'dedup' }), el('dd', { text: `${n.dedup.size ?? '-'} cached, ${n.dedup.hits ?? '-'} duplicates caught` }));
+    if (n.gateway) {
+      const g = n.gateway;
+      const probe = g.lastProbeAgeMs == null ? '' : `, last probe ${fmtAge(g.lastProbeAgeMs)} ago`;
+      kv.append(el('dt', { text: 'gateway' }), el('dd', { text: `${g.registered ? 'registered' : 'not registered'}${probe}`, cls: g.registered ? 'ok' : null }));
+    }
+    const parts = [kv];
+
+    if (n.counters) {
+      const c = n.counters;
+      const sent = obj(c.sent);
+      const rec = obj(c.received);
+      const types = ['request', 'response', 'oneway', 'broadcast'];
+      parts.push(el('h3', { text: 'messages' }),
+        miniTable(['', ...types], [['sent', ...types.map((t) => sent[t] ?? 0)], ['received', ...types.map((t) => rec[t] ?? 0)]]),
+        el('h3', { text: 'failures (as sender)' }), el('div', null, ...failureChips(c.failures)));
+    }
+
+    const own = (state.links || []).filter((l) => l.from === n.nodeId);
+    if (own.length && own.some((l) => 'misses' in l)) {
+      const rows = own.map((l) => {
+        const st = el('span', null, el('i', { cls: STATES.includes(l.state) ? `s-${l.state}` : 's-unknown' }), l.state);
+        const off = l.offsetMs == null ? '-' : `${l.offsetMs}${l.clockSync === 'out' ? ` ${OOS_MARK}` : ''}`;
+        return [l.to, st, l.misses, off, fmtAge(l.heartbeatAgeMs)];
+      });
+      parts.push(el('h3', { text: 'links from this node' }), miniTable(['peer', 'state', 'misses', 'offset ms', 'heartbeat age'], rows));
+    }
 
     const apps = el('ul', { cls: 'apps' });
     for (const a of n.apps || []) {
@@ -164,129 +231,7 @@
     }
     if (!(n.apps || []).length) apps.append(el('li', { cls: 'hint', text: 'no apps' }));
 
-    panel.replaceChildren(kv, el('h3', { text: 'apps and listeners' }), apps);
-  }
-
-  // ---- send console ----
-  function setOptions(select, values, fallback) {
-    const key = values.join('\u0000');
-    if (select.dataset.key === key) return;
-    const prev = select.value || fallback;
-    select.replaceChildren(...values.map((v) => { const o = el('option', { text: v }); o.value = v; return o; }));
-    select.dataset.key = key;
-    if (values.includes(prev)) select.value = prev;
-    else if (fallback && values.includes(fallback)) select.value = fallback;
-  }
-
-  function appsOf(nodeId) {
-    const n = state && (state.nodes || []).find((x) => x.nodeId === nodeId);
-    return n ? n.apps || [] : [];
-  }
-
-  function fillSendForm() {
-    if (!state) return;
-    const nodes = (state.nodes || []).map((n) => n.nodeId);
-    setOptions($('fFrom'), nodes, nodes[0]);
-    const fromApps = appsOf($('fFrom').value).map((a) => a.appId);
-    setOptions($('fFromApp'), fromApps, 'echo');
-    setOptions($('fToNode'), nodes.concat('*'), nodes[1] || nodes[0]);
-    const allApps = [];
-    const listeners = [];
-    for (const n of state.nodes || []) {
-      for (const a of n.apps || []) {
-        if (!allApps.includes(a.appId)) allApps.push(a.appId);
-        for (const lid of a.listenerIds || []) if (!listeners.includes(lid)) listeners.push(lid);
-      }
-    }
-    setOptions($('fToApp'), allApps.concat('*'), 'echo');
-    const dl = $('listenerList');
-    const lkey = listeners.join('\u0000');
-    if (dl.dataset.key !== lkey) {
-      dl.replaceChildren(...listeners.map((v) => { const o = el('option'); o.value = v; return o; }));
-      dl.dataset.key = lkey;
-    }
-    syncTypeFields();
-  }
-
-  function syncTypeFields() {
-    $('fScope').disabled = $('fType').value !== 'broadcast';
-  }
-
-  function buildSendBody() {
-    const type = $('fType').value;
-    const listener = $('fListener').value.trim();
-    const body = {
-      from: { nodeId: $('fFrom').value, appId: $('fFromApp').value },
-      type,
-      to: { nodeId: $('fToNode').value, appId: $('fToApp').value, listenerId: listener || null },
-    };
-    if (type === 'broadcast') body.scope = $('fScope').value;
-    const mt = $('fMsgType').value.trim();
-    if (mt !== '') body.msgTypeId = Number(mt);
-    const raw = $('fPayload').value.trim();
-    body.payload = raw === '' ? {} : JSON.parse(raw);
-    const ttl = $('fTtl').value.trim();
-    if (ttl !== '') body.ttlMs = Number(ttl);
-    return body;
-  }
-
-  function renderJson(pre, value) {
-    const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-    const lines = text.split('\n');
-    const nodes = [];
-    lines.forEach((line, i) => {
-      if (/^\s*"(code|at)":/.test(line)) nodes.push(el('span', { cls: 'hl', text: line }));
-      else nodes.push(line);
-      if (i < lines.length - 1) nodes.push('\n');
-    });
-    pre.replaceChildren(...nodes);
-  }
-
-  function collectErrors(j) {
-    const out = [];
-    if (!j || typeof j !== 'object') return out;
-    if (j.error && typeof j.error === 'object') out.push({ code: j.error.code, at: j.error.at });
-    for (const f of Array.isArray(j.failed) ? j.failed : []) out.push({ code: f.code, at: f.at || f.nodeId });
-    return out;
-  }
-
-  function renderResponse(r) {
-    $('respStatus').textContent = `HTTP ${r.status}`;
-    const badges = [];
-    if (r.json && r.json.outcome) badges.push(el('span', { cls: `badge out ${r.json.outcome}`, text: `outcome ${r.json.outcome}` }));
-    if (r.json && r.json.latencyMs != null) badges.push(el('span', { cls: 'hint', text: `${r.json.latencyMs} ms` }));
-    for (const e of collectErrors(r.json)) {
-      if (e.code) badges.push(el('span', { cls: 'badge code', text: e.code }));
-      if (e.at) badges.push(el('span', { cls: 'badge at', text: `at ${e.at}` }));
-    }
-    $('respBadges').replaceChildren(...badges);
-    renderJson($('respOut'), r.json != null ? r.json : r.text || '(empty body)');
-  }
-
-  async function onSend(ev) {
-    ev.preventDefault();
-    let body;
-    try {
-      body = buildSendBody();
-    } catch (e) {
-      $('sendNote').textContent = `payload is not valid JSON: ${e.message}`;
-      return;
-    }
-    $('sendNote').textContent = 'sending\u2026';
-    $('fSubmit').disabled = true;
-    renderJson($('reqOut'), body);
-    $('respBadges').replaceChildren();
-    $('respStatus').textContent = '';
-    $('respOut').replaceChildren();
-    try {
-      const r = await api('POST', '/send', body);
-      renderResponse(r);
-      $('sendNote').textContent = '';
-    } catch (e) {
-      $('sendNote').textContent = `send failed: ${e.message}`;
-    } finally {
-      $('fSubmit').disabled = false;
-    }
+    panel.replaceChildren(...parts, el('h3', { text: 'apps and listeners' }), apps);
   }
 
   // ---- polling ----
@@ -294,15 +239,15 @@
     if (!state) return;
     renderSummary(state);
     renderMatrix(state);
+    renderInternals(state);
     renderNode();
-    fillSendForm();
   }
 
   async function refresh() {
     if (polling) return;
     polling = true;
     try {
-      const r = await api('GET', '/state');
+      const r = await getState();
       if (!r.ok || !r.json) throw new Error(r.json && r.json.error ? r.json.error.code : `HTTP ${r.status}`);
       state = r.json;
       $('stateErr').textContent = '';
@@ -324,12 +269,6 @@
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { clearTimeout(timer); timer = null; } else { refresh().then(schedule); }
   });
-  $('sendForm').addEventListener('submit', onSend);
-  $('fType').addEventListener('change', () => {
-    syncTypeFields();
-    if ($('fType').value === 'broadcast') { $('fToNode').value = '*'; $('fListener').value = ''; }
-  });
-  $('fFrom').addEventListener('change', () => fillSendForm());
 
   renderLegend();
   refresh().then(schedule);

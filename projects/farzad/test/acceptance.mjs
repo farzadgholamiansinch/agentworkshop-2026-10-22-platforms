@@ -151,6 +151,58 @@ await check('heartbeat answers probes', async () => {
   ok(r.status === 200 && r.body.nodeId === 'n2' && typeof r.body.receivedTs === 'number', JSON.stringify(r.body));
 });
 
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const TYPES = ['request', 'response', 'oneway', 'broadcast'];
+function checkInternals(s) {
+  for (const n of s.nodes) {
+    ok(n.limits && n.limits.inflight === 50, `${n.nodeId} limits ${JSON.stringify(n.limits)}`);
+    ok(isNum(n.queued) && isNum(n.pending), `${n.nodeId} queued/pending ${n.queued} ${n.pending}`);
+    ok(n.dedup && isNum(n.dedup.size) && isNum(n.dedup.hits), `${n.nodeId} dedup ${JSON.stringify(n.dedup)}`);
+    ok(n.gateway && typeof n.gateway.registered === 'boolean' && (n.gateway.lastProbeAgeMs === null || isNum(n.gateway.lastProbeAgeMs)), `${n.nodeId} gateway ${JSON.stringify(n.gateway)}`);
+    const c = n.counters;
+    ok(c && TYPES.every((t) => isNum(c.sent[t]) && isNum(c.received[t])) && c.failures && typeof c.failures === 'object', `${n.nodeId} counters ${JSON.stringify(c)}`);
+  }
+  const sum = s.summary;
+  ok(sum && sum.linksByState && sum.clockSync && isNum(sum.clockSync.in) && isNum(sum.clockSync.out), `summary ${JSON.stringify(sum)}`);
+  ok(sum.maxAbsOffsetMs === null || isNum(sum.maxAbsOffsetMs), 'summary.maxAbsOffsetMs');
+  for (const k of ['messagingDisabled', 'inflight', 'pending', 'queued']) ok(isNum(sum[k]), `summary.${k}`);
+  ok(sum.failures && typeof sum.failures === 'object', 'summary.failures');
+  const total = Object.values(sum.linksByState).reduce((a, b) => a + b, 0);
+  ok(total === s.links.length, `linksByState sums to ${total}, links ${s.links.length}`);
+}
+
+await check('state exposes node internals (limits, queue, dedup, counters, link misses, summary)', async () => {
+  const s = await state();
+  checkInternals(s);
+  ok(s.links.every((l) => isNum(l.misses) && (l.heartbeatAgeMs === null || isNum(l.heartbeatAgeMs))), 'mesh links have misses and heartbeatAgeMs');
+  ok(s.links.some((l) => isNum(l.heartbeatAgeMs) && l.heartbeatAgeMs < 5000), 'recent heartbeats');
+  ok(s.summary.linksByState.reachable === 20 && s.summary.clockSync.in + s.summary.clockSync.out === 20, JSON.stringify(s.summary));
+  ok(node(s, 'n2').dedup.hits >= 2, `n2 dedup hits ${node(s, 'n2').dedup.hits} after duplicates`);
+  ok(node(s, 'n1').gateway.registered === false && node(s, 'n1').gateway.lastProbeAgeMs === null, 'mesh: not registered');
+});
+
+await check('counters move: request n1 to n2, NO_LISTENER counted on the sender', async () => {
+  const a = await state();
+  const r = await send({ type: 'request', to: { nodeId: 'n2', appId: 'echo' } });
+  ok(r.body.outcome === 'response', JSON.stringify(r.body));
+  const f = await send({ type: 'request', to: { nodeId: 'n2', appId: 'echo', listenerId: 'no-such' } });
+  ok(f.body.error && f.body.error.code === 'NO_LISTENER', JSON.stringify(f.body));
+  const u = await send({ type: 'oneway', to: { nodeId: 'n2', appId: 'nope' } });
+  ok(u.body.error && u.body.error.code === 'UNKNOWN_APP', JSON.stringify(u.body));
+  const b = await state();
+  const d = (s, id, k, t) => node(s, id).counters[k][t] || 0;
+  ok(d(b, 'n1', 'sent', 'request') - d(a, 'n1', 'sent', 'request') === 2, 'n1 sent.request +2');
+  ok(d(b, 'n2', 'received', 'request') - d(a, 'n2', 'received', 'request') === 2, 'n2 received.request +2');
+  ok(d(b, 'n2', 'sent', 'response') - d(a, 'n2', 'sent', 'response') === 1, 'n2 sent.response +1');
+  ok(d(b, 'n1', 'received', 'response') - d(a, 'n1', 'received', 'response') === 1, 'n1 received.response +1');
+  ok(d(b, 'n1', 'sent', 'oneway') - d(a, 'n1', 'sent', 'oneway') === 1, 'n1 sent.oneway +1');
+  ok(d(b, 'n1', 'failures', 'NO_LISTENER') - d(a, 'n1', 'failures', 'NO_LISTENER') === 1, 'n1 failures.NO_LISTENER +1');
+  ok(d(b, 'n1', 'failures', 'UNKNOWN_APP') - d(a, 'n1', 'failures', 'UNKNOWN_APP') === 1, 'n1 failures.UNKNOWN_APP +1');
+  ok(!node(b, 'n2').counters.failures.NO_LISTENER, 'failure not counted on the receiver');
+  ok((b.summary.failures.NO_LISTENER || 0) - (a.summary.failures.NO_LISTENER || 0) === 1, 'summary.failures.NO_LISTENER +1');
+  ok(b.summary.pending === 0 && node(b, 'n1').pending === 0, 'nothing pending after sync sends');
+});
+
 await check('async request + result + abort', async () => {
   const a = await send({ type: 'request', to: { nodeId: 'n2', appId: 'echo' }, async: true });
   ok(a.status === 202 && a.body.requestId, `async ${a.status}`);
@@ -350,6 +402,9 @@ await check('external node: only via the gateway; scope cluster excludes it, sco
 
 await check('MIN_NODES on delete', async () => {
   await post(`${N}/api/reset`, { nodes: 3, mode: 'mesh' });
+  const s = await state();
+  ok(s.nodes.every((n) => TYPES.every((t) => n.counters.sent[t] === 0 && n.counters.received[t] === 0) && !Object.keys(n.counters.failures).length && n.dedup.hits === 0), 'reset clears counters');
+  ok(!Object.keys(s.summary.failures).length, 'reset clears summary.failures');
   const r = await req('DELETE', `${N}/api/nodes/n1`);
   ok(r.status === 409 && r.body.error.code === 'MIN_NODES', `${r.status}`);
 });
@@ -368,6 +423,12 @@ await check('switch to gateway mode and route through it', async () => {
   ok(b.body.delivered && b.body.delivered.length === 4, `broadcast ${JSON.stringify(b.body)}`);
   const after = await routed();
   ok(after - before >= 2, 'went through gateway');
+  const s = await state();
+  checkInternals(s);
+  ok(s.links.every((l) => l.misses === null), 'gateway links have misses null');
+  const n1 = node(s, 'n1');
+  ok(n1.gateway.registered === true && isNum(n1.gateway.lastProbeAgeMs), `n1 gateway ${JSON.stringify(n1.gateway)}`);
+  ok(n1.counters.sent.request >= 1 && n1.counters.sent.broadcast >= 1, `n1 counters ${JSON.stringify(n1.counters.sent)}`);
 });
 
 await check('gateway mode: kill node, detection via gateway', async () => {

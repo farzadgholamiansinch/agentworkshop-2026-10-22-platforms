@@ -23,8 +23,11 @@ class Link {
     this.inflight = false;
   }
 
-  view() {
-    return { from: this.from, to: this.to, state: this.state, clockSync: this.clockSync, offsetMs: this.offsetMs, lastHeartbeatTs: this.lastHeartbeatTs };
+  view(now) {
+    return {
+      from: this.from, to: this.to, state: this.state, clockSync: this.clockSync, offsetMs: this.offsetMs, lastHeartbeatTs: this.lastHeartbeatTs,
+      misses: this.misses, heartbeatAgeMs: this.lastHeartbeatTs === null ? null : now - this.lastHeartbeatTs,
+    };
   }
 }
 

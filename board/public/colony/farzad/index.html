@@ -14,6 +14,11 @@
 </header>
 
 <main>
+  <section class="card wide" id="internalsCard">
+    <h2>Cluster internals <span class="hint">summed over all nodes</span></h2>
+    <div id="internals" class="internals"></div>
+  </section>
+
   <section class="card" id="matrixCard">
     <h2>Link matrix <span class="hint">rows send, columns receive; click a row label</span></h2>
     <div class="matrixWrap"><table id="matrix" class="matrix"></table></div>
@@ -25,40 +30,6 @@
     <div id="nodePanel"></div>
   </section>
 
-  <section class="card wide" id="sendCard">
-    <h2>Send console <span class="hint">POST /t/farzad/api/send</span></h2>
-    <form id="sendForm" autocomplete="off">
-      <label>type
-        <select id="fType">
-          <option value="request">request</option>
-          <option value="oneway">oneway</option>
-          <option value="broadcast">broadcast</option>
-        </select>
-      </label>
-      <label>from node <select id="fFrom"></select></label>
-      <label>from app <select id="fFromApp"></select></label>
-      <label>to nodeId <select id="fToNode"></select></label>
-      <label>appId <select id="fToApp"></select></label>
-      <label>listenerId <input id="fListener" list="listenerList" placeholder="optional"></label>
-      <datalist id="listenerList"></datalist>
-      <label>scope
-        <select id="fScope">
-          <option value="cluster">cluster</option>
-          <option value="all">all</option>
-        </select>
-      </label>
-      <label>msgTypeId <input id="fMsgType" type="number" step="1" placeholder="optional"></label>
-      <label>ttlMs <input id="fTtl" type="number" min="1" step="1" value="2000"></label>
-      <label class="payload">payload (JSON)
-        <textarea id="fPayload" rows="3" spellcheck="false">{"hello": "world"}</textarea>
-      </label>
-      <div class="actions"><button type="submit" id="fSubmit">Send</button> <span id="sendNote" class="hint"></span></div>
-    </form>
-    <div class="io">
-      <div><h3>request body</h3><pre id="reqOut" class="json"></pre></div>
-      <div><h3>response <span id="respStatus" class="hint"></span></h3><div id="respBadges" class="badges"></div><pre id="respOut" class="json"></pre></div>
-    </div>
-  </section>
 </main>
 
 <script src="app.js"></script>

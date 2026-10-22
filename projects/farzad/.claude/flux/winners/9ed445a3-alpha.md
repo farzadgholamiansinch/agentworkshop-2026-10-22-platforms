@@ -5,3 +5,5 @@ found: chaos restart reports "up" (fed to β gen-002)
 status: complete
 
 selected: 2026-10-22 11:05, sole timeline, verified in jsdom and embedded by anders in the group app (PR #9)
+
+mutation 11:14: chaos buttons removed; scope is inspect and send only, controls belong to the integrator tiles

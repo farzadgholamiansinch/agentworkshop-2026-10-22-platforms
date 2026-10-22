@@ -20,6 +20,24 @@ function guard(fn) {
   } catch (e) { log(e && e.message); }
 }
 
+// Collective view of node internals for /state (CONTRACT.md section 5, "summary").
+function summarize(nodes, links) {
+  const s = { linksByState: {}, clockSync: { in: 0, out: 0 }, maxAbsOffsetMs: null, messagingDisabled: 0, inflight: 0, pending: 0, queued: 0, failures: {} };
+  for (const l of links) {
+    s.linksByState[l.state] = (s.linksByState[l.state] || 0) + 1;
+    if (l.clockSync === 'in' || l.clockSync === 'out') s.clockSync[l.clockSync] += 1;
+    if (typeof l.offsetMs === 'number' && (s.maxAbsOffsetMs === null || Math.abs(l.offsetMs) > s.maxAbsOffsetMs)) s.maxAbsOffsetMs = Math.abs(l.offsetMs);
+  }
+  for (const n of nodes) {
+    if (n.messaging !== 'enabled') s.messagingDisabled += 1;
+    s.inflight += n.inflight;
+    s.pending += n.pending;
+    s.queued += n.queued;
+    for (const [k, v] of Object.entries(n.counters.failures)) s.failures[k] = (s.failures[k] || 0) + v;
+  }
+  return s;
+}
+
 class Cluster {
   constructor() {
     this.events = new Events(2000);
@@ -452,29 +470,33 @@ class Cluster {
   // ----- state (CONTRACT.md section 5) -----
 
   state() {
+    const now = Date.now();
     const all = [...this.nodes.values()];
     const links = [];
     let possible = 0;
     if (this.mode === 'mesh') {
-      for (const l of this.links.values()) links.push(l.view());
+      for (const l of this.links.values()) links.push(l.view(now));
       const c = all.filter((n) => !n.external).length;
       possible = c * (c - 1);
     }
     for (const n of all) {
       if (this.mode !== 'gateway' && !n.external) continue;
-      links.push({ from: n.id, to: 'gateway', state: n.gwLink.state, clockSync: null, offsetMs: null, lastHeartbeatTs: n.gwLink.lastContactTs });
+      const ts = n.gwLink.lastContactTs;
+      links.push({ from: n.id, to: 'gateway', state: n.gwLink.state, clockSync: null, offsetMs: null, lastHeartbeatTs: ts, misses: null, heartbeatAgeMs: ts === null ? null : now - ts });
       possible += 1;
     }
+    const nodes = all.map((n) => n.view(now));
     return {
       mode: this.mode,
       switching: this.switching,
       heartbeat: { ...L.HEARTBEAT },
       maxMessageBytes: 65536,
-      nodes: all.map((n) => n.view()),
+      nodes,
       links,
       possibleLinks: possible,
       openConnections: links.filter((l) => l.state === 'reachable').length,
       metrics: { mesh: this.metrics.snapshot('mesh'), gateway: this.metrics.snapshot('gateway') },
+      summary: summarize(nodes, links),
     };
   }
 }

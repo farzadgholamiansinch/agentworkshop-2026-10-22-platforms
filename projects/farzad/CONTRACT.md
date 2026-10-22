@@ -291,6 +291,37 @@ Switching back to mesh deregisters every node from the gateway, then rebuilds th
   `GET /t/pisak/api/events?since=N`. Before a switch to gateway mode the node module calls
   `POST /t/pisak/api/admin {"action": "reset"}`. Planned leaves and restarts are not counted.
 
+#### Node internals (additive, v0.2 compatible)
+
+Extra fields; nothing above is renamed or removed. All counters start at 0 on `POST /api/reset` and for new nodes.
+
+```json
+"nodes": [{"nodeId": "n1", "...": "fields above",
+  "limits": {"inflight": 50}, "queued": 0, "pending": 1,
+  "dedup": {"size": 42, "hits": 2},
+  "gateway": {"registered": false, "lastProbeAgeMs": null},
+  "counters": {"sent":     {"request": 12, "response": 9, "oneway": 3, "broadcast": 1},
+               "received": {"request": 9, "response": 11, "oneway": 2, "broadcast": 0},
+               "failures": {"NO_LISTENER": 1}}}],
+"links": [{"from": "n1", "to": "n2", "...": "fields above", "misses": 0, "heartbeatAgeMs": 420}],
+"summary": {"linksByState": {"reachable": 20}, "clockSync": {"in": 20, "out": 0}, "maxAbsOffsetMs": 3,
+            "messagingDisabled": 0, "inflight": 2, "pending": 1, "queued": 0, "failures": {"NO_LISTENER": 1}}
+```
+
+- `limits.inflight`: above this many messages in flight at the node, `deliver` answers `PEER_OVERLOADED`.
+- `queued`: sends waiting for the node's messaging to be enabled. `pending`: requests this node sent that have no
+  outcome yet.
+- `dedup.size`: message ids in the duplicate cache; `dedup.hits`: duplicates caught since reset.
+- `gateway.registered`: the node holds a gateway token. `gateway.lastProbeAgeMs`: ms since the gateway's last probe,
+  `null` when the node does not route via the gateway.
+- `counters.sent`: messages the node put on the wire (counted after messaging was enabled; `response` = answers it
+  produced). `counters.received`: messages accepted for this node (duplicates not counted; `response` = answers to its
+  own requests). `counters.failures`: error codes of section 2 for sends from this node, one per failed send, or one
+  per failed destination of a broadcast.
+- Link `misses`: consecutive missed heartbeats; `heartbeatAgeMs`: ms since the last answered heartbeat, `null` if
+  never. Gateway links have `misses: null` and `heartbeatAgeMs` from the last gateway contact.
+- `summary`: the same, summed over all nodes and links. `maxAbsOffsetMs` is `null` when no link has an offset.
+
 ### `GET /t/farzad/api/events?since=<seq>`
 
 Returns events with `seq` greater than `since` (exclusive), oldest first, at most 200.

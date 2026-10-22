@@ -7,6 +7,8 @@ const DEDUP_MAX = 256;
 const DEDUP_MS = 60000;
 const INFLIGHT_LIMIT = 50;
 const QUEUE_MAX = 1000;
+const TYPES = ['request', 'response', 'oneway', 'broadcast'];
+const zero = () => Object.fromEntries(TYPES.map((t) => [t, 0]));
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); if (t.unref) t.unref(); });
 
 class VirtualNode {
@@ -21,6 +23,9 @@ class VirtualNode {
     this.apps = new Map();
     this.chaos = { delayMs: 0, dropPercent: 0, skewMs: 0 };
     this.dedup = new Map();
+    this.dedupHits = 0;
+    this.pending = 0;
+    this.counters = { sent: zero(), received: zero(), failures: {} };
     this.waiters = [];
     this.route = 'mesh';
     this.forceDisabled = false;
@@ -69,8 +74,22 @@ class VirtualNode {
     return (app && app.msgTypes[String(msgTypeId)]) || null;
   }
 
-  view() {
-    return { nodeId: this.id, external: this.external, status: this.status, messaging: this.messaging, inflight: this.inflight, apps: this.appList(), chaos: { ...this.chaos } };
+  countSent(type) { if (type in this.counters.sent) this.counters.sent[type] += 1; }
+
+  countFailure(code) { const f = this.counters.failures; const k = code || 'UNKNOWN'; f[k] = (f[k] || 0) + 1; }
+
+  view(now) {
+    const c = this.counters;
+    const gwRoute = this.external || this.route === 'gateway';
+    return {
+      nodeId: this.id, external: this.external, status: this.status, messaging: this.messaging, inflight: this.inflight, apps: this.appList(), chaos: { ...this.chaos },
+      limits: { inflight: INFLIGHT_LIMIT },
+      queued: this.waiters.length,
+      pending: this.pending,
+      dedup: { size: this.dedup.size, hits: this.dedupHits },
+      gateway: { registered: !!this.token, lastProbeAgeMs: gwRoute && this.token && this.lastProbeTs ? now - this.lastProbeTs : null },
+      counters: { sent: { ...c.sent }, received: { ...c.received }, failures: { ...c.failures } },
+    };
   }
 
   // ----- messaging enabled / queued sends -----
@@ -132,9 +151,11 @@ class VirtualNode {
     this.pruneDedup(now);
     const seen = this.dedup.get(env.messageId);
     if (seen) {
+      this.dedupHits += 1;
       if (env.type === 'request') return seen.promise;
       return { status: 202, body: { accepted: true, duplicate: true } };
     }
+    if (env.type in this.counters.received) this.counters.received[env.type] += 1;
     const promise = this.process(env);
     this.dedup.set(env.messageId, { ts: now, promise });
     this.pruneDedup(now);
@@ -173,6 +194,7 @@ class VirtualNode {
       timestamp: this.now(), correlationId: req.messageId, ttlMs: req.ttlMs ?? E.DEFAULT_TTL, payload: req.payload ?? null,
     };
     if (req.msgTypeId !== undefined && req.msgTypeId !== null) r.msgTypeId = req.msgTypeId;
+    this.countSent('response');
     return r;
   }
 }
