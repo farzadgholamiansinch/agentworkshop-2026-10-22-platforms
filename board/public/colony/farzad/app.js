@@ -134,33 +134,6 @@
   }
 
   // ---- node panel ----
-  const CHAOS = [
-    { label: 'kill', body: { action: 'kill' }, danger: true },
-    { label: 'revive', body: { action: 'revive' } },
-    { label: 'restart', body: { action: 'restart', downMs: 3000 } },
-    { label: 'slow 800 ms', body: { action: 'slow', delayMs: 800 } },
-    { label: 'drop 30%', body: { action: 'drop', percent: 30 } },
-    { label: 'skew 500 ms', body: { action: 'skew', skewMs: 500 } },
-    { label: 'clear', body: { action: 'clear' } },
-  ];
-  let chaosNote = { nodeId: null, text: '', cls: '' };
-
-  async function doChaos(nodeId, spec) {
-    chaosNote = { nodeId, text: `${spec.label}\u2026`, cls: 'hint' };
-    renderNode();
-    try {
-      const r = await api('POST', '/chaos', Object.assign({}, spec.body, { nodeId }));
-      const err = r.json && r.json.error;
-      chaosNote = err
-        ? { nodeId, text: `${spec.label}: ${err.code || 'error'}${err.message ? ` (${err.message})` : ''}`, cls: 'bad' }
-        : r.ok ? { nodeId, text: `${spec.label}: ok, status ${(r.json && r.json.status) || '?'}`, cls: 'ok' }
-          : { nodeId, text: `${spec.label}: HTTP ${r.status}`, cls: 'bad' };
-    } catch (e) {
-      chaosNote = { nodeId, text: `${spec.label}: ${e.message}`, cls: 'bad' };
-    }
-    refresh();
-  }
-
   function renderNode() {
     const panel = $('nodePanel');
     const n = state && (state.nodes || []).find((x) => x.nodeId === selected);
@@ -191,15 +164,7 @@
     }
     if (!(n.apps || []).length) apps.append(el('li', { cls: 'hint', text: 'no apps' }));
 
-    const btns = el('div', { cls: 'chaosBtns' });
-    for (const spec of CHAOS) {
-      const b = el('button', { type: 'button', text: spec.label, cls: spec.danger ? 'danger' : '' });
-      b.addEventListener('click', () => doChaos(n.nodeId, spec));
-      btns.append(b);
-    }
-    const note = el('div', { cls: 'chaosNote' });
-    if (chaosNote.nodeId === n.nodeId) { note.textContent = chaosNote.text; note.className = `chaosNote ${chaosNote.cls}`; }
-    panel.replaceChildren(kv, el('h3', { text: 'apps and listeners' }), apps, el('h3', { text: 'chaos' }), btns, note);
+    panel.replaceChildren(kv, el('h3', { text: 'apps and listeners' }), apps);
   }
 
   // ---- send console ----
