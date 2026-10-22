@@ -210,15 +210,17 @@ await check('MIN_NODES on delete', async () => {
 await check('switch to gateway mode and route through it', async () => {
   await post(`${N}/api/reset`, { nodes: 5, mode: 'mesh' });
   await until(async () => (await state()).openConnections === 20, 8000, 'mesh up');
-  const before = (await get(`${G}/api/state`)).body.routes;
   const r = await post(`${N}/api/mode`, { mode: 'gateway' });
   ok(r.status === 200 && r.body.mode === 'gateway', `mode ${r.status} ${JSON.stringify(r.body)}`);
   await until(async () => { const s = await state(); return s.mode === 'gateway' && s.possibleLinks === 5 && s.links.every((l) => l.to === 'gateway'); }, 5000, 'gateway links');
+  // the fake gateway counts in /state.routes, the real one in /metrics.routed; the switch resets the counter
+  const routed = async () => (await get(`${G}/api/state`)).body.routes ?? (await get(`${G}/api/metrics`)).body.routed;
+  const before = await routed();
   const a = await send({ type: 'request', to: { nodeId: 'n3', appId: 'echo' } });
   ok(a.body.outcome === 'response', `route ${JSON.stringify(a.body)}`);
   const b = await send({ type: 'broadcast', to: { nodeId: '*', appId: 'sink' } });
   ok(b.body.delivered && b.body.delivered.length === 4, `broadcast ${JSON.stringify(b.body)}`);
-  const after = (await get(`${G}/api/state`)).body.routes;
+  const after = await routed();
   ok(after - before >= 2, 'went through gateway');
 });
 
