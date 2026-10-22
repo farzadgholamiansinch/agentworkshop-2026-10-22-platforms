@@ -564,6 +564,21 @@ await check('traffic: killed node is skipped by default, targeted with includeDo
   ok((c.metrics.lastRun.gateway.failures.NODE_UNAVAILABLE || 0) > (b.metrics.lastRun.gateway.failures.NODE_UNAVAILABLE || 0), 'failures show in the gateway run');
 });
 
+{
+  const name = 'gateway mode: a killed node turns unreachable in the other nodes\' peer views';
+  if (!gatewaySendsPeers) skip(name, 'this gateway sends no peers in its probes');
+  else {
+    await check(name, async () => {
+      const seen = (s) => s.links.filter((l) => l.via === 'gateway' && l.to === 'n4' && l.from !== 'n4');
+      await until(async () => seen(await state()).every((l) => l.state === 'unreachable'), 8000, 'n4 unreachable in views');
+      const s = await state();
+      ok(seen(s).length === 4, 'four observers');
+      ok(s.links.some((l) => l.via === 'gateway' && l.from === 'n1' && l.to === 'n2' && l.state === 'reachable'), 'live peers still reachable');
+      ok(s.summary.peerViews.unreachable >= 4, JSON.stringify(s.summary.peerViews));
+    });
+  }
+}
+
 await check('gateway down: NODE_UNAVAILABLE at gateway', async () => {
   await post(`${G}/api/admin`, { action: 'kill' });
   const r = await send({ type: 'request', to: { nodeId: 'n2', appId: 'echo' } });
