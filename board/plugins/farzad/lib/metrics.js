@@ -44,6 +44,22 @@ class Metrics {
     return r && r.endedTs === null ? r : null;
   }
 
+  // After a mode switch: a finished run with messages is kept until the new run has its first message or detection,
+  // so switching into a mode and out again without traffic does not wipe its results.
+  armRun(mode, now = Date.now()) {
+    if (!(mode in this.runs)) return;
+    const r = this.runs[mode];
+    if (r && r.endedTs !== null && r.messages > 0) this.pending[mode] = now;
+    else this.startRun(mode, now);
+  }
+
+  // The run that takes new samples, starting a pending one; null when the mode is not active.
+  liveRun(mode) {
+    if (this.pending[mode] != null) this.startRun(mode, this.pending[mode]);
+    const r = this.runs[mode];
+    return r && r.endedTs === null ? r : null;
+  }
+
   // Freezes the run, with the topology it had when the mode was left.
   endRun(mode, topo, now = Date.now()) {
     this.pending[mode] = null;

@@ -232,17 +232,19 @@ test('state imports Farzad frozen per-mode metrics using the published fields', 
           detectMsAvg: 3100,
           openConnections: 20,
           nodes: 5,
-          duration: 12000,
+          durationMs: 12000,
+          endedTs: 1700000000000,
         },
         gateway: {
           p50: 6,
           p95: 11,
           throughput: 18,
           errorRate: 0.03,
-          detectMsAvg: 3000,
+          detectMsAvg: null,
           openConnections: 5,
           nodes: 5,
-          duration: 11000,
+          durationMs: 11000,
+          endedTs: null,
         },
       };
       return responseWithJson(state);
@@ -261,10 +263,14 @@ test('state imports Farzad frozen per-mode metrics using the published fields', 
     openConnections: 20,
     nodeCount: 5,
     durationMs: 12000,
+    endedAt: 1700000000000,
     capturedAt: result.body.scenario.results.mesh.capturedAt,
   });
   assert.ok(Number.isFinite(Date.parse(result.body.scenario.results.mesh.capturedAt)));
+  assert.equal(result.body.scenario.results.gateway.failedNodeDetectionMs, null);
   assert.deepEqual(result.body.scenario.results.gateway.gatewayMetrics, { routed: 81, retries: 2 });
+  const secondRead = await getState();
+  assert.equal(secondRead.body.scenario.results.mesh.capturedAt, result.body.scenario.results.mesh.capturedAt);
 });
 
 test('state labels simulated metrics when the live Node API is unavailable', async () => {
@@ -277,14 +283,23 @@ test('state labels simulated metrics when the live Node API is unavailable', asy
   assert.equal(result.body.metrics.throughput, 138);
 });
 
-test('traffic controls update Farzad traffic and chaos APIs', async () => {
+test('traffic controls use supported send types and target a healthy node for drop chaos', async () => {
   const calls = [];
+  let dropPercent = 0;
   global.fetch = async (url, options) => {
     const target = new URL(url);
     calls.push({ path: target.pathname, method: options.method, body: options.body && JSON.parse(options.body) });
     if (target.pathname === '/t/farzad/api/traffic') return responseWithJson({ rate: 180 });
-    if (target.pathname === '/t/farzad/api/chaos') return responseWithJson({ nodeId: 'n2', status: 'up' });
-    if (target.pathname === '/t/farzad/api/state') return responseWithJson(nodeState());
+    if (target.pathname === '/t/farzad/api/chaos') {
+      dropPercent = Number(JSON.parse(options.body).percent) || 0;
+      return responseWithJson({ nodeId: 'n1', status: 'up' });
+    }
+    if (target.pathname === '/t/farzad/api/state') {
+      return responseWithJson({
+        ...nodeState(),
+        nodes: [{ nodeId: 'n1', status: 'up', chaos: { delayMs: 0, dropPercent } }],
+      });
+    }
     assert.fail(`unexpected upstream path ${target.pathname}`);
   };
 
@@ -292,17 +307,37 @@ test('traffic controls update Farzad traffic and chaos APIs', async () => {
   assert.equal(result.status, 200);
   assert.deepEqual(calls.map(({ path, method }) => [path, method]), [
     ['/t/farzad/api/traffic', 'POST'],
+    ['/t/farzad/api/state', 'GET'],
     ['/t/farzad/api/chaos', 'POST'],
     ['/t/farzad/api/state', 'GET'],
   ]);
   assert.deepEqual(calls[0].body, {
     rate: 180,
-    mix: { request: 60, oneway: 13, broadcast: 7 },
+    mix: { request: 60, oneway: 33, broadcast: 7 },
     payloadBytes: 512,
   });
-  assert.deepEqual(calls[1].body, { action: 'drop', nodeId: 'n2', percent: 5 });
+  assert.deepEqual(calls[2].body, { action: 'drop', nodeId: 'n1', percent: 5 });
   assert.equal(result.body.state.source, 'live');
   assert.equal(result.body.state.traffic.rate, 180);
+  assert.equal(result.body.state.chaos.dropNodeId, 'n1');
+});
+
+test('traffic changes without an explicit drop rate leave node chaos untouched', async () => {
+  const calls = [];
+  global.fetch = async (url, options) => {
+    const target = new URL(url);
+    calls.push({ path: target.pathname, method: options.method });
+    if (target.pathname === '/t/farzad/api/traffic') return responseWithJson({ rate: 180 });
+    if (target.pathname === '/t/farzad/api/state') return responseWithJson(nodeState());
+    assert.fail(`unexpected upstream path ${target.pathname}`);
+  };
+
+  const result = await control('set-traffic', { rate: 180, payloadBytes: 512 });
+  assert.equal(result.status, 200);
+  assert.deepEqual(calls.map(({ path, method }) => [path, method]), [
+    ['/t/farzad/api/traffic', 'POST'],
+    ['/t/farzad/api/state', 'GET'],
+  ]);
 });
 
 test('starting a demo reports upstream failure and unlocks controls', async () => {
@@ -317,13 +352,17 @@ test('starting a demo reports upstream failure and unlocks controls', async () =
   assert.equal(state.running, false);
   assert.match(state.scenario.step, /Demo paused/);
   assert.match(state.liveError, /gateway unavailable/);
+  assert.equal(state.scenario.steps[0].status, 'failed');
+  assert.match(state.scenario.steps[0].error, /gateway unavailable/);
 });
 
 test('live demo runs the same node-failure scenario in mesh and gateway modes', async () => {
   const calls = [];
   let mode = 'mesh';
+  let nodeCount = 5;
   let nodeDown = false;
   let eventSeq = 0;
+  const events = [];
   const ha = { enabled: false, active: 'a', detectMs: 1000, failovers: 0 };
   global.setTimeout = callback => {
     queueMicrotask(callback);
@@ -345,11 +384,13 @@ test('live demo runs the same node-failure scenario in mesh and gateway modes', 
     }
     if (target.pathname === '/t/farzad/api/reset') {
       mode = body.mode;
+      nodeCount = body.nodes;
       nodeDown = false;
       eventSeq += 1;
       return responseWithJson({ mode, nodes: ['n1', 'n2', 'n3', 'n4', 'n5'] });
     }
     if (target.pathname === '/t/farzad/api/nodes') {
+      nodeCount += body.count;
       eventSeq += 1;
       return responseWithJson({ nodes: Array.from({ length: body.count }, (_, i) => `n${i + 6}`) }, 201);
     }
@@ -360,6 +401,7 @@ test('live demo runs the same node-failure scenario in mesh and gateway modes', 
     if (target.pathname === '/t/farzad/api/chaos') {
       nodeDown = body.action === 'kill';
       eventSeq += 1;
+      if (nodeDown) events.push({ seq: eventSeq, type: 'node.down', to: body.nodeId, ts: Date.now() });
       return responseWithJson({ nodeId: body.nodeId, status: nodeDown ? 'down' : 'up' });
     }
     if (target.pathname === '/t/farzad/api/mode') {
@@ -368,19 +410,45 @@ test('live demo runs the same node-failure scenario in mesh and gateway modes', 
       return responseWithJson({ mode, switchMs: 3, failed: [] });
     }
     if (target.pathname === '/t/farzad/api/state') {
-      const nodes = Array.from({ length: 15 }, (_, i) => ({
+      const nodes = Array.from({ length: nodeCount }, (_, i) => ({
         nodeId: `n${i + 1}`,
         status: nodeDown && i === 1 ? 'down' : 'up',
         chaos: { delayMs: 0, dropPercent: 0 },
       }));
+      const snapshot = nodeState(mode);
+      snapshot.metrics.lastRun = {
+        mesh: mode === 'gateway' ? {
+          p50Ms: 4,
+          p95Ms: 9,
+          throughputPerSec: 23,
+          errorRate: 0.02,
+          detectMsAvg: null,
+          openConnections: 105,
+          nodes: 15,
+          durationMs: 12000,
+          endedTs: 1700000000000,
+        } : null,
+        gateway: mode === 'gateway' ? {
+          p50Ms: 6,
+          p95Ms: 11,
+          throughputPerSec: 18,
+          errorRate: 0.03,
+          detectMsAvg: null,
+          openConnections: 17,
+          nodes: 15,
+          durationMs: 11000,
+          endedTs: null,
+        } : null,
+      };
       return responseWithJson({
-        ...nodeState(mode),
+        ...snapshot,
         nodes,
-        openConnections: mode === 'mesh' ? 196 : 14,
+        openConnections: mode === 'mesh' ? 105 : 17,
       });
     }
     if (target.pathname === '/t/farzad/api/events') {
-      return responseWithJson({ seq: eventSeq, more: false, events: [] });
+      const since = Number(target.searchParams.get('since')) || 0;
+      return responseWithJson({ seq: eventSeq, more: false, events: events.filter(event => event.seq > since) });
     }
     if (target.pathname === '/t/pisak/api/state') {
       return responseWithJson({ gateway: { status: 'up' }, ha: { ...ha } });
@@ -400,21 +468,47 @@ test('live demo runs the same node-failure scenario in mesh and gateway modes', 
   const state = JSON.parse(fs.readFileSync(path.join(dataDir, 'platforms-tp.state.json'), 'utf8'));
   assert.equal(state.running, false);
   assert.equal(state.scenario.step, 'Demo complete');
-  assert.equal(state.mode, 'mesh');
+  assert.deepEqual(state.scenario.steps.map(step => step.id), [
+    'start-mesh',
+    'mesh-traffic',
+    'scale-mesh',
+    'mesh-failure',
+    'gateway-replay',
+    'gateway-ha',
+    'comparison',
+  ]);
+  assert.ok(state.scenario.steps.every(step => step.status === 'done'));
+  assert.equal(state.scenario.steps[2].metrics.nodeCount, 15);
+  assert.notEqual(state.scenario.steps[3].metrics.detectionMs, null);
+  assert.notEqual(state.scenario.steps[4].metrics.detectionMs, null);
+  assert.equal(state.scenario.conclusion.lowerP95Mode, 'mesh');
+  assert.equal(state.scenario.conclusion.fewerConnectionsMode, 'gateway');
+  assert.equal(state.mode, 'gateway');
   assert.equal(state.source, 'live');
+  assert.equal(state.scenario.baseline.nodeCount, 5);
   assert.equal(state.scenario.results.mesh.nodeCount, 15);
   assert.equal(state.scenario.results.gateway.nodeCount, 15);
+  assert.equal(state.scenario.results.mesh.durationMs, 12000);
+  assert.equal(state.scenario.results.gateway.durationMs, 11000);
+  assert.equal(state.scenario.results.mesh.openConnections, 105);
+  assert.equal(state.scenario.results.gateway.openConnections, 17);
+  assert.notEqual(state.scenario.detection.mesh, null);
+  assert.notEqual(state.scenario.detection.gateway, null);
   assert.equal(state.scenario.results.gateway.gatewayMetrics.routed, 81);
   assert.equal(state.gateway.haEnabled, false);
   assert.ok(calls.some(call => call.path === '/t/pisak/api/admin' && call.body.action === 'ha' && call.body.enabled === true));
   assert.ok(calls.some(call => call.path === '/t/pisak/api/admin' && call.body.action === 'ha' && call.body.enabled === false));
   assert.ok(calls.filter(call => call.path === '/t/pisak/api/admin' && call.body.action === 'kill').length >= 2);
-  assert.ok(state.scenario.eventCursors['Measuring mesh traffic']);
-  assert.ok(state.scenario.eventCursors['Measuring gateway traffic']);
+  assert.ok(state.scenario.eventCursors['Measuring five-node mesh baseline']);
+  assert.ok(state.scenario.eventCursors['Measuring fifteen-node mesh traffic']);
+  assert.ok(state.scenario.eventCursors['Measuring fifteen-node gateway traffic']);
   assert.ok(calls.some(call => call.path === '/t/farzad/api/nodes' && call.body.count === 10));
-  assert.ok(calls.some(call => call.path === '/t/farzad/api/chaos' && call.body.action === 'kill' && call.body.nodeId === 'n2'));
+  assert.equal(calls.filter(call => call.path === '/t/farzad/api/chaos' && call.body.action === 'kill' && call.body.nodeId === 'n2').length, 2);
   assert.ok(calls.some(call => call.path === '/t/farzad/api/mode' && call.body.mode === 'gateway'));
-  assert.ok(calls.some(call => call.path === '/t/farzad/api/mode' && call.body.mode === 'mesh'));
+  assert.equal(calls.some(call => call.path === '/t/farzad/api/mode' && call.body.mode === 'mesh'), false);
+  const scaleIndex = calls.findIndex(call => call.path === '/t/farzad/api/nodes');
+  const firstStateRead = calls.findIndex(call => call.path === '/t/farzad/api/state');
+  assert.ok(firstStateRead >= 0 && firstStateRead < scaleIndex);
 });
 
 test('manual controls are rejected while a persisted demo is running', async () => {
@@ -427,4 +521,29 @@ test('manual controls are rejected while a persisted demo is running', async () 
   const result = await control('toggle-mode');
   assert.equal(result.status, 409);
   assert.match(result.body.error, /locked while the demo is running/);
+});
+
+test('plugin restart fails the in-progress demo step visibly', () => {
+  fs.writeFileSync(path.join(dataDir, 'platforms-tp.state.json'), JSON.stringify({
+    running: true,
+    scenario: {
+      runId: 'interrupted-run',
+      steps: [{
+        id: 'gateway-replay',
+        title: 'Repeat traffic and node failure in gateway mode',
+        status: 'running',
+        startedAt: '2026-10-22T10:50:00.000Z',
+        completedAt: null,
+        metrics: null,
+      }],
+    },
+  }));
+
+  plugin.init({ dataDir });
+  const state = JSON.parse(fs.readFileSync(path.join(dataDir, 'platforms-tp.state.json'), 'utf8'));
+  assert.equal(state.running, false);
+  assert.equal(state.scenario.step, 'Demo interrupted by restart');
+  assert.equal(state.scenario.steps[0].status, 'failed');
+  assert.match(state.scenario.steps[0].error, /interrupted by restart/);
+  assert.ok(Number.isFinite(Date.parse(state.scenario.steps[0].completedAt)));
 });
