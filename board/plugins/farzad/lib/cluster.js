@@ -216,13 +216,14 @@ class Cluster {
   async beat(l, a, b) {
     l.inflight = true;
     const ep = this.epoch;
+    const startTs = Date.now();
     const sentTs = a.now();
     let r;
     try {
       r = await call('POST', `/t/farzad/n/${b.id}/heartbeat`, { from: a.id, seq: ++this.hbSeq, ts: sentTs, state: 'up' }, { timeoutMs: HB_TIMEOUT_MS });
     } finally { l.inflight = false; }
     if (ep !== this.epoch || this.links.get(l.key) !== l || a.status !== 'up' || this.mode !== 'mesh') return;
-    if (r.status === 200 && r.body && r.body.nodeId === b.id) this.apply(L.onAnswer(l, sentTs, r.body.receivedTs, r.body.ts, a.now()));
+    if (r.status === 200 && r.body && r.body.nodeId === b.id) this.apply(L.onAnswer(l, sentTs, r.body.receivedTs, r.body.ts, a.now(), startTs));
     else this.apply(L.onMiss(l, Date.now()));
   }
 
@@ -405,11 +406,12 @@ class Cluster {
         const downMs = Number.isFinite(Number(b.downMs)) && Number(b.downMs) >= 0 ? Math.min(Number(b.downMs), 120000) : 3000;
         const ep = this.epoch;
         this.emit({ type: 'node.restarting', from: n.id, to: n.id, ok: true, downMs });
+        // Stop answering before the announcement, so no peer sees an answer after it marked the link restarting.
+        n.status = 'restarting';
+        this.goneQuiet(n);
         guard(async () => {
           await this.announce(n, 'restarting');
-          if (ep !== this.epoch || n.status !== 'up') return;
-          n.status = 'restarting';
-          this.goneQuiet(n);
+          if (ep !== this.epoch || n.status !== 'restarting') return;
           n.restartTimer = this.later(downMs, () => { n.restartTimer = null; if (ep === this.epoch && n.status === 'restarting') this.comeBack(n); });
         });
         break;

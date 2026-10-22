@@ -135,7 +135,6 @@ class VirtualNode {
       if (env.type === 'request') return seen.promise;
       return { status: 202, body: { accepted: true, duplicate: true } };
     }
-    if (this.inflight >= INFLIGHT_LIMIT) return this.fail(E.error('PEER_OVERLOADED', this.id, `${this.inflight} messages in flight`), env);
     const promise = this.process(env);
     this.dedup.set(env.messageId, { ts: now, promise });
     this.pruneDedup(now);
@@ -146,28 +145,24 @@ class VirtualNode {
     return { status: E.statusOf(err), body: { error: err, correlationId: (env && typeof env.messageId === 'string') ? env.messageId : null } };
   }
 
+    // In-flight accounting (PEER_OVERLOADED) is done by the deliver endpoint, so that messages held by slow chaos count.
   async process(env) {
-    this.inflight += 1;
-    try {
-      const d = env.destination;
-      let targets;
-      if (d.appId === '*') targets = [...this.apps.values()];
-      else {
-        const app = this.apps.get(d.appId);
-        if (!app) return this.fail(E.error('UNKNOWN_APP', this.id, `no application ${d.appId} on ${this.id}`), env);
-        if (d.listenerId != null && !app.listenerIds.has(d.listenerId)) return this.fail(E.error('NO_LISTENER', this.id, `no listener ${d.listenerId}`), env);
-        targets = [app];
-      }
-      if (env.type !== 'request') return { status: 202, body: { accepted: true } };
-      // A request is answered by the first application that answers; sink never answers.
-      if (!targets.some((a) => a.kind !== 'sink')) {
-        await sleep(Math.min(env.ttlMs || E.DEFAULT_TTL, 30000));
-        return this.fail(E.error('TIMEOUT', this.id, `${d.appId} does not answer requests`), env);
-      }
-      return { status: 200, body: this.response(env) };
-    } finally {
-      this.inflight -= 1;
+    const d = env.destination;
+    let targets;
+    if (d.appId === '*') targets = [...this.apps.values()];
+    else {
+      const app = this.apps.get(d.appId);
+      if (!app) return this.fail(E.error('UNKNOWN_APP', this.id, `no application ${d.appId} on ${this.id}`), env);
+      if (d.listenerId != null && !app.listenerIds.has(d.listenerId)) return this.fail(E.error('NO_LISTENER', this.id, `no listener ${d.listenerId}`), env);
+      targets = [app];
     }
+    if (env.type !== 'request') return { status: 202, body: { accepted: true } };
+    // A request is answered by the first application that answers; sink never answers.
+    if (!targets.some((a) => a.kind !== 'sink')) {
+      await sleep(Math.min(env.ttlMs || E.DEFAULT_TTL, 30000));
+      return this.fail(E.error('TIMEOUT', this.id, `${d.appId} does not answer requests`), env);
+    }
+    return { status: 200, body: this.response(env) };
   }
 
   response(req) {
@@ -182,4 +177,4 @@ class VirtualNode {
   }
 }
 
-module.exports = { VirtualNode };
+module.exports = { VirtualNode, INFLIGHT_LIMIT };

@@ -37,7 +37,9 @@ function move(link, to, failure = false) {
 }
 
 // A heartbeat answer. Times: sentTs/answerTs on the sender's clock, receivedTs/ts on the peer's clock.
-function onAnswer(link, sentTs, receivedTs, ts, answerTs) {
+// beatStartTs (local Date.now()) lets a restarting link ignore answers to beats sent before the announcement.
+function onAnswer(link, sentTs, receivedTs, ts, answerTs, beatStartTs) {
+  if (link.state === 'restarting' && typeof beatStartTs === 'number' && link.restartTs !== null && beatStartTs <= link.restartTs) return null;
   if (typeof receivedTs === 'number' && typeof ts === 'number') {
     link.offsetMs = Math.round(((receivedTs - sentTs) + (ts - answerTs)) / 2);
     link.clockSync = Math.abs(link.offsetMs) <= SYNC_LIMIT_MS ? 'in' : 'out';

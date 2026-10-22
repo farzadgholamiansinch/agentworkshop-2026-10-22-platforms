@@ -89,9 +89,9 @@ itself) is not a protocol error. `at` says who produced the error (`node`, `gate
 | `NO_LISTENER` | 404 | The application exists but has no listener with that `listenerId`. |
 | `TIMEOUT` | 504 | No answer within `ttlMs`. Also what the sender sees when a message is dropped. |
 | `NODE_UNAVAILABLE` | 503 | The node (or, with `at: "gateway"`, the gateway) is known but down. |
-| `PEER_OVERLOADED` | 503 | The destination has too many messages in flight (default limit 50 per node). |
+| `PEER_OVERLOADED` | 503 | The destination has too many messages in flight (default limit 50 per node). A message counts as in flight from the moment it reaches the node until it is answered, including time held by `slow` chaos. |
 | `MESSAGE_TOO_LARGE` | 413 | The envelope is larger than 65536 bytes. |
-| `REJECTED` | 401 / 429 | `reason: "auth"` (401) or `reason: "rate_limit"` (429). |
+| `REJECTED` | 401 / 429 | `reason: "auth"` (401) or `reason: "rate_limit"` (429). Only the gateway produces it; a `rate_limit` rejection is passed to the sender unchanged (`at: "gateway"`) and is not retried. |
 | `BAD_PROTOCOL` | 400 | Wrong `proto`, unsupported `version`, or an invalid envelope. |
 | `MODE_SWITCH_FAILED` | 502 | Only from `POST /api/mode`, see section 4. |
 | `MIN_NODES` | 409 | Only from `DELETE /api/nodes/<id>`: the cluster cannot go below 3 nodes. |
@@ -242,7 +242,9 @@ Switching back to mesh deregisters every node from the gateway, then rebuilds th
 ```
 
 - `kill`: the node stops answering and stops sending heartbeats, with no announcement. It stays in the list as `down`.
-- `restart`: a graceful restart. The node announces `restarting`, is down for `downMs`, then comes back.
+- `restart`: a graceful restart. The node announces `restarting`, is down for `downMs`, then comes back. Its status
+  is `restarting` from the moment the chaos call answers (the answer already shows it), and it answers nothing until it
+  is back.
 - `slow` and `drop` apply to everything the node receives, heartbeats included, so they can cause false failure
   detection. That is on purpose. A dropped message gives the sender `TIMEOUT`.
 - `skew` shifts the node's clock, to show links going `out` of clock sync.
