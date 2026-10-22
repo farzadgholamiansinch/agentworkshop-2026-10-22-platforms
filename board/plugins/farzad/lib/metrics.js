@@ -25,10 +25,10 @@ class Metrics {
   startRun(mode, now = Date.now()) {
     if (!(mode in this.runs)) return;
     this.pending[mode] = null;
-    this.runs[mode] = { startedTs: now, endedTs: null, topo: null, messages: 0, errors: 0, lat: [], detectSum: 0, detectCount: 0, failures: {} };
+    this.runs[mode] = { startedTs: now, endedTs: null, topo: null, messages: 0, errors: 0, lat: [], detectSum: 0, detectCount: 0, joinSum: 0, joinCount: 0, failures: {} };
   }
 
-  // After a mode switch: a finished run with messages is kept until the new run has its first message or detection,
+  // After a mode switch: a finished run with messages is kept until the new run has its first message, detection or join,
   // so switching into a mode and out again without traffic does not wipe its results.
   armRun(mode, now = Date.now()) {
     if (!(mode in this.runs)) return;
@@ -68,6 +68,8 @@ class Metrics {
       throughputPerSec: Math.round((r.messages / Math.max(1, durationMs / 1000)) * 10) / 10,
       errorRate: r.messages ? Math.round((r.errors / r.messages) * 1000) / 1000 : 0,
       detectMsAvg: r.detectCount ? Math.round(r.detectSum / r.detectCount) : null,
+      joinMsAvg: r.joinCount ? Math.round(r.joinSum / r.joinCount) : null,
+      joins: r.joinCount,
       failures: { ...r.failures },
     };
   }
@@ -94,6 +96,12 @@ class Metrics {
     const r = this.liveRun(mode);
     if (r) { r.detectSum += Math.round(ms); r.detectCount += 1; }
     if (b.detect.length > 1000) b.detect.shift();
+  }
+
+  // Join time of a new node, like a detection it counts as activity in the mode's run.
+  join(mode, ms) {
+    const r = this.liveRun(mode);
+    if (r) { r.joinSum += Math.round(ms); r.joinCount += 1; }
   }
 
   snapshot(mode) {
